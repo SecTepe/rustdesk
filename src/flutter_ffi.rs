@@ -103,6 +103,27 @@ pub fn host_stop_system_key_propagate(_stopped: bool) {
     crate::platform::windows::stop_system_key_propagate(_stopped);
 }
 
+/// Submit a new support request to the admin server configured via the
+/// `admin-server-url` and `admin-enroll-secret` options. Returns `true` when
+/// the POST was accepted (HTTP 2xx), `false` otherwise. See
+/// `src/admin/client.rs`.
+pub fn session_request_support(reason: String) -> SyncReturn<bool> {
+    SyncReturn(crate::admin::client::create_support_request_blocking(reason))
+}
+
+/// Return the last-known status message from the Request Support flow
+/// (empty if nothing has been submitted yet this session).
+pub fn session_support_request_status() -> SyncReturn<String> {
+    SyncReturn(crate::admin::client::last_status())
+}
+
+/// Whether `admin-server-url` and `admin-enroll-secret` are both set. The
+/// Flutter UI uses this to hide the "Request Support" button when the admin
+/// console isn't configured.
+pub fn session_support_request_enabled() -> SyncReturn<bool> {
+    SyncReturn(crate::admin::client::is_enabled())
+}
+
 // This function is only used to count the number of control sessions.
 pub fn peer_get_sessions_count(id: String, conn_type: i32) -> SyncReturn<usize> {
     let conn_type = if conn_type == ConnType::VIEW_CAMERA as i32 {

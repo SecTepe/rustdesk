@@ -84,6 +84,27 @@ stunclient = "0.4"
 kcp-sys= { git = "https://github.com/rustdesk-org/kcp-sys"}
 reqwest = { version = "0.12", features = ["blocking", "socks", "json", "native-tls", "rustls-tls", "rustls-tls-native-roots", "gzip"], default-features=false }
 
+# Admin web console (src/admin/*). axum + tower-http power the embedded HTTP
+# server; tokio-stream bridges the broadcast channel to SSE. Mobile builds
+# don't ship the server, so these deps are scoped to desktop targets.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.axum]
+version = "0.7"
+default-features = false
+features = ["http1", "json", "query", "tokio", "tower-log"]
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.tower]
+version = "0.5"
+default-features = false
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.tower-http]
+version = "0.6"
+default-features = false
+features = ["cors", "trace"]
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.tokio-stream]
+version = "0.1"
+features = ["sync"]
+
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # https://github.com/rustdesk/rustdesk/discussions/10197, not use cpal on linux
 cpal = { git = "https://github.com/rustdesk-org/cpal", branch = "osx-screencapturekit" }
