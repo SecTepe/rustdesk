@@ -609,6 +609,11 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         crate::platform::try_kill_broker();
         #[cfg(feature = "hwcodec")]
         scrap::hwcodec::start_check_process();
+        // Spawn the admin web console if the operator enabled it. This is a
+        // no-op on mobile targets and when `enable-admin-server` is unset.
+        if let Err(err) = crate::admin::start_if_enabled() {
+            log::error!("admin: failed to spawn server: {}", err);
+        }
         crate::RendezvousMediator::start_all().await;
     } else {
         match crate::ipc::connect(1000, "").await {

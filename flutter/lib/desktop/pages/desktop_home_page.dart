@@ -93,6 +93,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       buildTip(context),
       if (!isOutgoingOnly) buildIDBoard(context),
       if (!isOutgoingOnly) buildPasswordBoard(context),
+      if (!isOutgoingOnly) buildRequestSupportCard(context),
       FutureBuilder<Widget>(
         future: Future.value(
             Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
@@ -904,6 +905,115 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         ],
       ),
     );
+  }
+
+  /// Renders the "Request Support" card in the left pane. Hidden when the
+  /// admin server is not configured on this device (i.e. `admin-server-url`
+  /// or `admin-enroll-secret` is empty). See `src/admin/client.rs`.
+  Widget buildRequestSupportCard(BuildContext context) {
+    // Wrapped in Obx so the status line updates live after a submission.
+    final enabled = bind.sessionSupportRequestEnabled();
+    if (!enabled) {
+      return const Offstage();
+    }
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: Theme.of(context).dividerColor.withOpacity(0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.support_agent, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                translate('Need help?'),
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            translate(
+                'Send a support request to your administrator.'),
+            style: TextStyle(
+                fontSize: 12,
+                color:
+                    Theme.of(context).textTheme.bodyLarge?.color?.withOpacity(0.7)),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.send, size: 16),
+              label: Text(translate('Request Support')),
+              onPressed: () => _openRequestSupportDialog(context),
+            ),
+          ),
+          Obx(() => Text(
+                _requestSupportStatus.value,
+                style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context)
+                        .textTheme
+                        .bodyLarge
+                        ?.color
+                        ?.withOpacity(0.6)),
+              )),
+        ],
+      ),
+    );
+  }
+
+  final RxString _requestSupportStatus = "".obs;
+
+  void _openRequestSupportDialog(BuildContext context) {
+    final reasonCtrl = TextEditingController();
+    gFFI.dialogManager.show((setState, close, dCtx) {
+      return CustomAlertDialog(
+        title: Text(translate('Request Support')),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(translate(
+                'Describe your issue so the admin can help you quickly:')),
+            const SizedBox(height: 10),
+            TextField(
+              controller: reasonCtrl,
+              maxLines: 4,
+              autofocus: true,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                hintText: translate('e.g. printer not working'),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          dialogButton('Cancel',
+              onPressed: close, isOutline: true),
+          dialogButton('Send', onPressed: () {
+            final reason = reasonCtrl.text.trim();
+            // Fire-and-forget: the Rust side is synchronous and already
+            // runs on a background thread, so we just await the result.
+            Future(() {
+              final ok = bind.sessionRequestSupport(reason: reason);
+              _requestSupportStatus.value = ok
+                  ? translate('Support request sent.')
+                  : bind.sessionSupportRequestStatus();
+            });
+            close();
+          }),
+        ],
+      );
+    });
   }
 }
 

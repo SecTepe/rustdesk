@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RustDesk Admin Console</title>
+  <link rel="stylesheet" href="/admin/app.css" />
+</head>
+<body>
+  <header>
+    <h1>RustDesk Admin</h1>
+    <div id="session-info"></div>
+  </header>
+
+  <main id="login-view" hidden>
+    <section class="card">
+      <h2>Sign in</h2>
+      <p class="muted">
+        Paste the <code>access_token</code> from your RustDesk account login,
+        or use the local admin password if your install is configured for
+        offline access.
+      </p>
+      <label>Display name <input id="login-name" type="text" /></label>
+      <label>Access token <input id="login-token" type="password" /></label>
+      <label>Local password (optional) <input id="login-local" type="password" /></label>
+      <button id="login-btn">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </section>
+  </main>
+
+  <main id="app-view" hidden>
+    <nav>
+      <button data-tab="requests" class="active">Support Requests</button>
+      <button data-tab="devices">Registered Devices</button>
+      <button id="logout-btn" class="right">Sign out</button>
+    </nav>
+
+    <section id="tab-requests">
+      <div class="toolbar">
+        <select id="request-status-filter">
+          <option value="">All</option>
+          <option value="pending" selected>Pending</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+          <option value="closed">Closed</option>
+        </select>
+        <button id="refresh-requests">Refresh</button>
+      </div>
+      <table id="requests-table">
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Requester</th>
+            <th>Reason</th>
+            <th>Created</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-devices" hidden>
+      <div class="toolbar">
+        <input id="device-search" type="text" placeholder="Search id / alias / hostname" />
+        <button id="refresh-devices">Refresh</button>
+        <button id="add-device-btn">Add device</button>
+      </div>
+      <table id="devices-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Alias</th>
+            <th>Hostname</th>
+            <th>OS</th>
+            <th>Owner</th>
+            <th>Tags</th>
+            <th>Last seen</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>

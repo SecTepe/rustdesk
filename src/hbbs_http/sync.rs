@@ -91,9 +91,29 @@ async fn start_hbbs_sync_async() {
     let mut last_sent: Option<Instant> = None;
     let mut info_uploaded = InfoUploaded::default();
     let mut sysinfo_ver = "".to_owned();
+    // Self-enroll into the admin console (src/admin/*). Only happens once per
+    // process lifetime. Silently no-ops when `admin-server-url` is empty.
+    let mut admin_enrolled = false;
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                // Fire a one-shot admin self-enroll, independent of the
+                // hbbs heartbeat status. Silently skipped when the operator
+                // has not configured `admin-server-url` +
+                // `admin-enroll-secret`. Errors are logged but do not stop
+                // the heartbeat loop.
+                if !admin_enrolled && crate::admin::client::is_enabled() {
+                    match crate::admin::client::enroll_self().await {
+                        Ok(()) => {
+                            log::info!("admin: self-enroll OK");
+                            admin_enrolled = true;
+                        }
+                        Err(err) => {
+                            log::debug!("admin: self-enroll deferred: {}", err);
+                        }
+                    }
+                }
+
                 let url = heartbeat_url();
                 let id = Config::get_id();
                 if url.is_empty() {
