@@ -811,11 +811,15 @@ impl Client {
                                 conn.send(&Message::new()).await?;
                             }
                         } else {
-                            // fall back to non-secure connection in case pk mismatch
-                            log::info!("pk mismatch, fall back to non-secure");
-                            let mut msg_out = Message::new();
-                            msg_out.set_public_key(PublicKey::new());
-                            conn.send(&msg_out).await?;
+                            // The signed id/pk from the rendezvous server
+                            // failed verification. Previously we silently
+                            // downgraded to an unencrypted connection,
+                            // which let a malicious rendezvous server (or
+                            // any network MITM) strip the session's
+                            // end-to-end encryption. Abort instead.
+                            log::error!("Handshake failed: signed id/pk verification failed");
+                            conn.send(&Message::new()).await?;
+                            bail!("signed id/pk verification failed");
                         }
                     } else {
                         log::error!("Handshake failed: invalid message type");

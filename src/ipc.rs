@@ -441,7 +441,11 @@ pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
             #[cfg(not(windows))]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0777)).ok();
+                // User-only: the IPC endpoint exposes privileged
+                // operations (config, options, file ops). Letting any
+                // local user connect would be a local privilege
+                // escalation.
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0600)).ok();
                 write_pid(postfix);
             }
             Ok(incoming)
@@ -1058,7 +1062,7 @@ fn write_pid(postfix: &str) {
     let path = get_pid_file(postfix);
     if let Ok(mut file) = File::create(&path) {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0777)).ok();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0644)).ok();
         file.write_all(&std::process::id().to_string().into_bytes())
             .ok();
     }

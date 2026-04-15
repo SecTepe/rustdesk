@@ -31,9 +31,28 @@ pub struct SharedConfig(HashMap<String, String>);
 pub struct PeerConfig(HashMap<String, String>);
 type PeersConfig = HashMap<String, PeerConfig>;
 
+// Reject anything that isn't a safe single path component. This guards
+// every path-building helper below against `..` traversal, embedded
+// path separators, and other tricks — the scariest impact would be
+// `remove()` calling `fs::remove_dir_all()` on an attacker-chosen
+// directory outside the plugins folder.
 #[inline]
-fn path_plugins(id: &str) -> PathBuf {
-    HbbConfig::path("plugins").join(id)
+fn is_safe_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s != "."
+        && s != ".."
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+#[inline]
+fn path_plugins(id: &str) -> Option<PathBuf> {
+    if !is_safe_component(id) {
+        log::error!("Refusing to build plugin path for unsafe id {:?}", id);
+        return None;
+    }
+    Some(HbbConfig::path("plugins").join(id))
 }
 
 pub fn remove(id: &str) {
@@ -41,7 +60,10 @@ pub fn remove(id: &str) {
     CONFIG_PEERS.lock().unwrap().remove(id);
     // allow_err is Ok here.
     allow_err!(ManagerConfig::remove_plugin(id));
-    if let Err(e) = fs::remove_dir_all(path_plugins(id)) {
+    let Some(dir) = path_plugins(id) else {
+        return;
+    };
+    if let Err(e) = fs::remove_dir_all(dir) {
         log::error!("Failed to remove plugin '{}' directory: {}", id, e);
     }
 }
@@ -76,8 +98,8 @@ impl DerefMut for PeerConfig {
 
 impl SharedConfig {
     #[inline]
-    fn path(id: &str) -> PathBuf {
-        path_plugins(id).join("shared.toml")
+    fn path(id: &str) -> Option<PathBuf> {
+        Some(path_plugins(id)?.join("shared.toml"))
     }
 
     #[inline]
@@ -86,7 +108,10 @@ impl SharedConfig {
         if lock.contains_key(id) {
             return;
         }
-        let conf = hbb_common::config::load_path::<HashMap<String, String>>(Self::path(id));
+        let Some(path) = Self::path(id) else {
+            return;
+        };
+        let conf = hbb_common::config::load_path::<HashMap<String, String>>(path);
         let mut conf = SharedConfig(conf);
         if let Some(desc_conf) = super::plugins::get_desc_conf(id) {
             for item in desc_conf.shared.iter() {
@@ -123,7 +148,10 @@ impl SharedConfig {
         match CONFIG_SHARED.lock().unwrap().get_mut(id) {
             Some(config) => {
                 config.insert(key.to_owned(), value.to_owned());
-                hbb_common::config::store_path(Self::path(id), config)
+                let Some(path) = Self::path(id) else {
+                    bail!("Invalid plugin id {}", id);
+                };
+                hbb_common::config::store_path(path, config)
             }
             None => {
                 // unreachable
@@ -135,10 +163,16 @@ impl SharedConfig {
 
 impl PeerConfig {
     #[inline]
-    fn path(id: &str, peer: &str) -> PathBuf {
-        path_plugins(id)
-            .join("peers")
-            .join(format!("{}.toml", peer))
+    fn path(id: &str, peer: &str) -> Option<PathBuf> {
+        if !is_safe_component(peer) {
+            log::error!("Refusing to build peer path for unsafe peer {:?}", peer);
+            return None;
+        }
+        Some(
+            path_plugins(id)?
+                .join("peers")
+                .join(format!("{}.toml", peer)),
+        )
     }
 
     #[inline]
@@ -150,7 +184,10 @@ impl PeerConfig {
             }
         }
 
-        let conf = hbb_common::config::load_path::<HashMap<String, String>>(Self::path(id, peer));
+        let Some(path) = Self::path(id, peer) else {
+            return;
+        };
+        let conf = hbb_common::config::load_path::<HashMap<String, String>>(path);
         let mut conf = PeerConfig(conf);
         if let Some(desc_conf) = super::plugins::get_desc_conf(id) {
             for item in desc_conf.peer.iter() {
@@ -199,7 +236,10 @@ impl PeerConfig {
             Some(peers) => match peers.get_mut(peer) {
                 Some(config) => {
                     config.insert(key.to_owned(), value.to_owned());
-                    hbb_common::config::store_path(Self::path(id, peer), config)
+                    let Some(path) = Self::path(id, peer) else {
+                        bail!("Invalid plugin id {} or peer {}", id, peer);
+                    };
+                    hbb_common::config::store_path(path, config)
                 }
                 None => {
                     // unreachable
@@ -360,4 +400,35 @@ pub(super) extern "C" fn cb_get_conf(
         _ => {}
     }
     ptr::null()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_ids() {
+        assert!(path_plugins("..").is_none());
+        assert!(path_plugins(".").is_none());
+        assert!(path_plugins("").is_none());
+        assert!(path_plugins("foo/bar").is_none());
+        assert!(path_plugins("foo\\bar").is_none());
+        assert!(path_plugins("../etc").is_none());
+        assert!(path_plugins(&"a".repeat(65)).is_none());
+    }
+
+    #[test]
+    fn accepts_safe_ids() {
+        assert!(path_plugins("foo").is_some());
+        assert!(path_plugins("foo-1.0").is_some());
+        assert!(path_plugins("foo_bar").is_some());
+    }
+
+    #[test]
+    fn rejects_traversal_peers() {
+        assert!(PeerConfig::path("plugin", "..").is_none());
+        assert!(PeerConfig::path("plugin", "foo/bar").is_none());
+        assert!(PeerConfig::path("..", "peer").is_none());
+        assert!(PeerConfig::path("plugin", "peer").is_some());
+    }
 }

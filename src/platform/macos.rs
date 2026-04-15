@@ -1153,17 +1153,61 @@ pub fn check_super_user_permission() -> ResultType<bool> {
     unsafe { Ok(MacCheckAdminAuthorization() == YES) }
 }
 
+// Wrap `s` in POSIX single quotes so it can be safely embedded in a
+// /bin/sh command line (the shell that `do shell script` hands to).
+// Any internal single quote is closed, escaped, and reopened.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+// Escape a Rust string so that it can be placed inside an AppleScript
+// double-quoted string literal without breaking out of it.
+fn applescript_double_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 pub fn elevate(args: Vec<&str>, prompt: &str) -> ResultType<bool> {
     let cmd = std::env::current_exe()?;
     match cmd.to_str() {
         Some(cmd) => {
-            let mut cmd_with_args = cmd.to_string();
+            // Build a shell command line with each component individually
+            // single-quoted so that arguments containing spaces, quotes,
+            // backticks, `;`, `&`, `$`, etc. cannot break out and run
+            // arbitrary shell code with administrator privileges.
+            let mut shell_cmd = shell_single_quote(cmd);
             for arg in args {
-                cmd_with_args = format!("{} {}", cmd_with_args, arg);
+                shell_cmd.push(' ');
+                shell_cmd.push_str(&shell_single_quote(arg));
             }
+            // Both the shell command and the prompt are embedded inside
+            // AppleScript string literals by `do shell script`, so they
+            // also need AppleScript-level escaping.
             let script = format!(
-                r#"do shell script "{}" with prompt "{}" with administrator privileges"#,
-                cmd_with_args, prompt
+                "do shell script {} with prompt {} with administrator privileges",
+                applescript_double_quote(&shell_cmd),
+                applescript_double_quote(prompt),
             );
             match std::process::Command::new("osascript")
                 .arg("-e")
@@ -1180,6 +1224,42 @@ pub fn elevate(args: Vec<&str>, prompt: &str) -> ResultType<bool> {
         None => {
             bail!("Failed to get current exe str");
         }
+    }
+}
+
+#[cfg(test)]
+mod elevate_tests {
+    use super::{applescript_double_quote, shell_single_quote};
+
+    #[test]
+    fn shell_single_quote_escapes_inner_quotes() {
+        assert_eq!(shell_single_quote("abc"), "'abc'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(
+            shell_single_quote("rm -rf /; echo pwned"),
+            "'rm -rf /; echo pwned'"
+        );
+    }
+
+    #[test]
+    fn applescript_double_quote_escapes_backslash_and_quote() {
+        assert_eq!(applescript_double_quote("abc"), "\"abc\"");
+        assert_eq!(applescript_double_quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(applescript_double_quote("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[test]
+    fn injection_attempt_is_contained() {
+        // An attacker-controlled argument cannot escape either the shell
+        // argument list or the AppleScript string.
+        let malicious = "x\"; rm -rf ~; #";
+        let shell = shell_single_quote(malicious);
+        assert!(shell.starts_with('\'') && shell.ends_with('\''));
+        let applescript = applescript_double_quote(&shell);
+        // The payload must still be present as data inside a single
+        // well-formed AppleScript double-quoted string.
+        assert!(applescript.starts_with('"') && applescript.ends_with('"'));
+        assert!(applescript.contains("rm -rf"));
     }
 }
 
