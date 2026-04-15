@@ -144,10 +144,12 @@ async fn start_hbbs_sync_async() {
                     if !ab_alias.is_empty() {
                         v[keys::OPTION_PRESET_ADDRESS_BOOK_ALIAS] = json!(ab_alias);
                     }
-                    let ab_password = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD);
-                    if !ab_password.is_empty() {
-                        v[keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD] = json!(ab_password);
-                    }
+                    // NOTE: do NOT push `preset-address-book-password` in the
+                    // plaintext sysinfo heartbeat. The heartbeat runs pre-login
+                    // and is vulnerable to credential exfiltration via MiTM if
+                    // TLS validation is bypassed. If the server needs the
+                    // address-book secret, it must be exchanged over an
+                    // authenticated channel (SRP or post-login API).
                     let ab_note = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_NOTE);
                     if !ab_note.is_empty() {
                         v[keys::OPTION_PRESET_ADDRESS_BOOK_NOTE] = json!(ab_note);
@@ -284,23 +286,115 @@ fn heartbeat_url() -> String {
     format!("{}/api/heartbeat", url)
 }
 
+// Keys that MUST NEVER be writable by a remote strategy payload, even when
+// the user has explicitly enabled `allow-remote-config-modification`. A rogue
+// or compromised API server (see report 2.2/2.6/2.7) could otherwise use a
+// strategy push to:
+//   - kill manageability (`stop-service`)
+//   - silently re-home the client to attacker infrastructure (`*-server`,
+//     `key`)
+//   - remove the user's network restrictions (`whitelist`, `access-mode`,
+//     `direct-*`)
+//   - hijack outbound traffic via a MiTM proxy (`socks5-proxy-config`)
+//   - inject/exfiltrate address-book credentials
+//   - hide the tray or force disconnect so the user can't react
+//   - re-enable remote config modification after the user has turned it off.
+const STRATEGY_DENYLIST: &[&str] = &[
+    // Manageability kill switch
+    "stop-service",
+    // Self-re-enable loop
+    "allow-remote-config-modification",
+    // Infrastructure re-homing
+    "api-server",
+    "custom-rendezvous-server",
+    "relay-server",
+    "key",
+    // Network access escalation / whitelist bypass
+    "whitelist",
+    "access-mode",
+    "direct-server",
+    "direct-access-port",
+    // MiTM proxy injection
+    "socks5-proxy-config",
+    // Address-book credential injection
+    "preset-address-book-password",
+    "preset-address-book-name",
+    "preset-address-book-tag",
+    // UI hiding / forced termination
+    "hide-tray",
+    "allow-auto-disconnect",
+    "auto-disconnect-timeout",
+];
+
+#[inline]
+fn is_strategy_denylisted(key: &str) -> bool {
+    STRATEGY_DENYLIST.iter().any(|k| *k == key)
+}
+
 fn handle_config_options(config_options: HashMap<String, String>) {
+    // Enforce the runtime `allow-remote-config-modification` toggle. If the
+    // user has not explicitly opted in, drop the entire strategy payload.
+    // Without this gate, any API endpoint the client heartbeats against can
+    // rewrite local security policy (report 2.2).
+    let allow_remote = Config::get_option(keys::OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION) == "Y";
+    if !allow_remote {
+        if !config_options.is_empty() {
+            let keys_list: Vec<&String> = config_options.keys().collect();
+            log::warn!(
+                "strategy ignored: allow-remote-config-modification=N (rejected keys: {:?})",
+                keys_list
+            );
+        }
+        return;
+    }
+
     let mut options = Config::get_options();
     let default_settings = config::DEFAULT_SETTINGS.read().unwrap().clone();
-    config_options
-        .iter()
-        .map(|(k, v)| {
-            // Priority: user config > default advanced options.
-            // Only when default advanced options are also empty, remove user option (fallback to built-in default);
-            // otherwise insert an empty value so user config remains present.
-            if v.is_empty() && default_settings.get(k).map_or("", |v| v).is_empty() {
-                options.remove(k);
-            } else {
-                options.insert(k.to_string(), v.to_string());
-            }
-        })
-        .count();
+    for (k, v) in config_options.iter() {
+        // Drop any key that is on the hard denylist even if the user has
+        // enabled remote config modification. These keys carry security
+        // policy that must not be server-controlled.
+        if is_strategy_denylisted(k) {
+            log::warn!("strategy: refusing to apply denylisted key {}", k);
+            continue;
+        }
+        // Priority: user config > default advanced options.
+        // Only when default advanced options are also empty, remove user option
+        // (fallback to built-in default); otherwise insert an empty value so
+        // user config remains present.
+        if v.is_empty() && default_settings.get(k).map_or("", |v| v).is_empty() {
+            options.remove(k);
+        } else {
+            options.insert(k.to_string(), v.to_string());
+        }
+    }
     Config::set_options(options);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denylist_blocks_sensitive_keys() {
+        assert!(is_strategy_denylisted("stop-service"));
+        assert!(is_strategy_denylisted("api-server"));
+        assert!(is_strategy_denylisted("custom-rendezvous-server"));
+        assert!(is_strategy_denylisted("relay-server"));
+        assert!(is_strategy_denylisted("key"));
+        assert!(is_strategy_denylisted("whitelist"));
+        assert!(is_strategy_denylisted("access-mode"));
+        assert!(is_strategy_denylisted("allow-remote-config-modification"));
+        assert!(is_strategy_denylisted("socks5-proxy-config"));
+        assert!(is_strategy_denylisted("preset-address-book-password"));
+    }
+
+    #[test]
+    fn denylist_allows_benign_keys() {
+        assert!(!is_strategy_denylisted("theme"));
+        assert!(!is_strategy_denylisted("language"));
+        assert!(!is_strategy_denylisted("enable-keyboard"));
+    }
 }
 
 #[allow(unused)]

@@ -1,6 +1,6 @@
 use hbb_common::{
     async_recursion::async_recursion,
-    config::{Config, Socks5Server},
+    config::{allow_insecure_tls_fallback, Config, Socks5Server},
     log::{self, info},
     proxy::{Proxy, ProxyScheme},
     tls::{
@@ -153,19 +153,33 @@ fn create_http_client_with_url_(
         if e.is_request() {
             match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
                 (TlsType::Rustls, _, None) => {
-                    log::warn!(
-                        "Failed to connect to server {} with rustls-tls: {:?}, trying accept invalid cert",
-                        tls_url,
-                        e
-                    );
-                    client = create_http_client_with_url_(
-                        url,
-                        tls_url,
-                        tls_type,
-                        is_tls_type_cached,
-                        Some(true),
-                        original_danger_accept_invalid_cert,
-                    );
+                    // Only retry with danger_accept_invalid_certs(true) when
+                    // the user has explicitly opted in via
+                    // `allow-insecure-tls-fallback`. Without this guard, a
+                    // MiTM can force a handshake failure and silently drop
+                    // the client into an unauthenticated connection (report
+                    // 2.4).
+                    if allow_insecure_tls_fallback() {
+                        log::warn!(
+                            "Failed to connect to server {} with rustls-tls: {:?}, trying accept invalid cert",
+                            tls_url,
+                            e
+                        );
+                        client = create_http_client_with_url_(
+                            url,
+                            tls_url,
+                            tls_type,
+                            is_tls_type_cached,
+                            Some(true),
+                            original_danger_accept_invalid_cert,
+                        );
+                    } else {
+                        log::error!(
+                            "TLS handshake failed for {} ({:?}); insecure fallback disabled (allow-insecure-tls-fallback=N)",
+                            tls_url,
+                            e
+                        );
+                    }
                 }
                 (TlsType::Rustls, false, Some(_)) => {
                     log::warn!(
@@ -183,19 +197,27 @@ fn create_http_client_with_url_(
                     );
                 }
                 (TlsType::NativeTls, _, None) => {
-                    log::warn!(
-                        "Failed to connect to server {} with native-tls: {:?}, trying accept invalid cert",
-                        tls_url,
-                        e
-                    );
-                    client = create_http_client_with_url_(
-                        url,
-                        tls_url,
-                        tls_type,
-                        is_tls_type_cached,
-                        Some(true),
-                        original_danger_accept_invalid_cert,
-                    );
+                    if allow_insecure_tls_fallback() {
+                        log::warn!(
+                            "Failed to connect to server {} with native-tls: {:?}, trying accept invalid cert",
+                            tls_url,
+                            e
+                        );
+                        client = create_http_client_with_url_(
+                            url,
+                            tls_url,
+                            tls_type,
+                            is_tls_type_cached,
+                            Some(true),
+                            original_danger_accept_invalid_cert,
+                        );
+                    } else {
+                        log::error!(
+                            "TLS handshake failed for {} ({:?}); insecure fallback disabled (allow-insecure-tls-fallback=N)",
+                            tls_url,
+                            e
+                        );
+                    }
                 }
                 _ => {
                     log::error!(
@@ -264,20 +286,30 @@ async fn create_http_client_async_with_url_(
     if let Err(e) = client.head(url).send().await {
         match (tls_type, is_tls_type_cached, danger_accept_invalid_cert) {
             (TlsType::Rustls, _, None) => {
-                log::warn!(
-                    "Failed to connect to server {} with rustls-tls: {:?}, trying accept invalid cert",
-                    tls_url,
-                    e
-                );
-                client = create_http_client_async_with_url_(
-                    url,
-                    tls_url,
-                    tls_type,
-                    is_tls_type_cached,
-                    Some(true),
-                    original_danger_accept_invalid_cert,
-                )
-                .await;
+                // See sync path for rationale. Gate the insecure escalation
+                // behind allow-insecure-tls-fallback (report 2.4).
+                if allow_insecure_tls_fallback() {
+                    log::warn!(
+                        "Failed to connect to server {} with rustls-tls: {:?}, trying accept invalid cert",
+                        tls_url,
+                        e
+                    );
+                    client = create_http_client_async_with_url_(
+                        url,
+                        tls_url,
+                        tls_type,
+                        is_tls_type_cached,
+                        Some(true),
+                        original_danger_accept_invalid_cert,
+                    )
+                    .await;
+                } else {
+                    log::error!(
+                        "TLS handshake failed for {} ({:?}); insecure fallback disabled (allow-insecure-tls-fallback=N)",
+                        tls_url,
+                        e
+                    );
+                }
             }
             (TlsType::Rustls, false, Some(_)) => {
                 log::warn!(
@@ -296,20 +328,28 @@ async fn create_http_client_async_with_url_(
                 .await;
             }
             (TlsType::NativeTls, _, None) => {
-                log::warn!(
-                    "Failed to connect to server {} with native-tls: {:?}, trying accept invalid cert",
-                    tls_url,
-                    e
-                );
-                client = create_http_client_async_with_url_(
-                    url,
-                    tls_url,
-                    tls_type,
-                    is_tls_type_cached,
-                    Some(true),
-                    original_danger_accept_invalid_cert,
-                )
-                .await;
+                if allow_insecure_tls_fallback() {
+                    log::warn!(
+                        "Failed to connect to server {} with native-tls: {:?}, trying accept invalid cert",
+                        tls_url,
+                        e
+                    );
+                    client = create_http_client_async_with_url_(
+                        url,
+                        tls_url,
+                        tls_type,
+                        is_tls_type_cached,
+                        Some(true),
+                        original_danger_accept_invalid_cert,
+                    )
+                    .await;
+                } else {
+                    log::error!(
+                        "TLS handshake failed for {} ({:?}); insecure fallback disabled (allow-insecure-tls-fallback=N)",
+                        tls_url,
+                        e
+                    );
+                }
             }
             _ => {
                 log::error!(

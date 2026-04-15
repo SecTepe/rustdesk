@@ -2366,9 +2366,11 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
   } else if (uri.authority == "config") {
     if (isAndroid || isIOS) {
       final config = uri.path.substring("/".length);
-      // add a timer to make showToast work
+      // Deferred via a Timer so the overlay stack is ready; see fix 2.6 in
+      // TLP:GREEN security report — a silent importConfig here was the
+      // zero-click infrastructure-hijack entry point.
       Timer(Duration(seconds: 1), () {
-        importConfig(null, null, config);
+        _confirmAndImportRustdeskUriConfig(config);
       });
     }
     return null;
@@ -2376,10 +2378,10 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     if (isAndroid || isIOS) {
       final password = uri.path.substring("/".length);
       if (password.isNotEmpty) {
-        Timer(Duration(seconds: 1), () async {
-          final ok =
-              await bind.mainSetPermanentPasswordWithResult(password: password);
-          showToast(translate(ok ? 'Successful' : 'Failed'));
+        // See fix 2.3 in TLP:GREEN security report — the original handler
+        // silently overwrote the permanent password. Require confirmation.
+        Timer(Duration(seconds: 1), () {
+          _confirmAndSetRustdeskUriPassword(password);
         });
       }
     }
@@ -3499,6 +3501,66 @@ importConfig(List<TextEditingController>? controllers, List<RxString>? errMsgs,
   } else {
     showToast(translate('Clipboard is empty'));
   }
+}
+
+// Confirmation wrappers for the `rustdesk://` URI handlers. The original
+// handlers invoked privileged FFI functions silently with no user consent,
+// which made them the zero-click entry point for the 2.3 (password overwrite)
+// and 2.6 (infrastructure re-homing) issues in the TLP:GREEN security report.
+// Cancel is the default action; the user must explicitly confirm.
+void _confirmAndImportRustdeskUriConfig(String rawConfig) {
+  ServerConfig sc;
+  try {
+    sc = ServerConfig.decode(rawConfig);
+  } catch (_) {
+    showToast(translate('Invalid server configuration'));
+    return;
+  }
+  if (sc.idServer.isEmpty) {
+    showToast(translate('Invalid server configuration'));
+    return;
+  }
+  final body = [
+    '${translate('ID Server')}: ${sc.idServer}',
+    if (sc.relayServer.isNotEmpty)
+      '${translate('Relay Server')}: ${sc.relayServer}',
+    if (sc.apiServer.isNotEmpty) '${translate('API Server')}: ${sc.apiServer}',
+    if (sc.key.isNotEmpty) '${translate('Key')}: ${sc.key}',
+  ].join('\n');
+  msgBox(
+    gFFI.sessionId,
+    'custom-nocancel',
+    'Import server configuration?',
+    body,
+    '',
+    gFFI.dialogManager,
+    hasCancel: true,
+    onSubmit: () {
+      importConfig(null, null, rawConfig);
+    },
+  );
+}
+
+void _confirmAndSetRustdeskUriPassword(String password) {
+  // Deliberately show only the length, never the value: a dialog body is
+  // visible to shoulder-surfers and to any screen-recording overlay.
+  final body =
+      'A new permanent password (${password.length} chars) will be set on this device. '
+      'Only confirm this if you initiated the request.';
+  msgBox(
+    gFFI.sessionId,
+    'custom-nocancel',
+    'Set permanent password?',
+    body,
+    '',
+    gFFI.dialogManager,
+    hasCancel: true,
+    onSubmit: () async {
+      final ok =
+          await bind.mainSetPermanentPasswordWithResult(password: password);
+      showToast(translate(ok ? 'Successful' : 'Failed'));
+    },
+  );
 }
 
 Future<bool> setServerConfig(
