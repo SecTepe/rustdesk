@@ -286,5 +286,88 @@ fn update_new_version(update_msi: bool, version: &str, file_path: &PathBuf) {
 
 pub fn get_download_file_from_url(url: &str) -> Option<PathBuf> {
     let filename = url.split('/').last()?;
-    Some(std::env::temp_dir().join(filename))
+    // Only accept filenames that look like a plain basename. Reject
+    // anything containing path separators, NUL, or `..` components so
+    // a crafted URL can't push the download outside the update dir.
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains('\0')
+    {
+        return None;
+    }
+    let dir = get_update_download_dir()?;
+    Some(dir.join(filename))
+}
+
+// Return a per-process-user directory to hold update downloads. It is
+// created lazily with tight permissions (owner-only on Unix) so that a
+// local attacker can't pre-create a symlink at the destination path and
+// trick the updater into writing over arbitrary files.
+fn get_update_download_dir() -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("rustdesk-update");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        match std::fs::symlink_metadata(&dir) {
+            Ok(md) => {
+                if !md.file_type().is_dir() {
+                    // Refuse to use a symlink / regular file sitting at
+                    // our chosen path — an attacker may have planted it.
+                    log::error!(
+                        "Update dir {:?} exists but is not a real directory; refusing to use it",
+                        dir
+                    );
+                    return None;
+                }
+                // Tighten permissions in case they drifted.
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            Err(_) => {
+                if let Err(e) = std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&dir)
+                {
+                    log::error!("Failed to create update dir {:?}: {}", dir, e);
+                    return None;
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                log::error!("Failed to create update dir {:?}: {}", dir, e);
+                return None;
+            }
+        }
+    }
+    Some(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_bad_filenames() {
+        assert!(get_download_file_from_url("http://x/").is_none());
+        assert!(get_download_file_from_url("http://x/..").is_none());
+        assert!(get_download_file_from_url("http://x/.").is_none());
+        assert!(get_download_file_from_url("http://x/a\\b").is_none());
+    }
+
+    #[test]
+    fn accepts_plain_basename() {
+        let p = get_download_file_from_url("http://x/foo.exe").expect("path");
+        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("foo.exe"));
+        assert_eq!(
+            p.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()),
+            Some("rustdesk-update")
+        );
+    }
 }
