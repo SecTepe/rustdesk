@@ -144,10 +144,12 @@ async fn start_hbbs_sync_async() {
                     if !ab_alias.is_empty() {
                         v[keys::OPTION_PRESET_ADDRESS_BOOK_ALIAS] = json!(ab_alias);
                     }
-                    let ab_password = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD);
-                    if !ab_password.is_empty() {
-                        v[keys::OPTION_PRESET_ADDRESS_BOOK_PASSWORD] = json!(ab_password);
-                    }
+                    // NOTE: do NOT push `preset-address-book-password` in the
+                    // plaintext sysinfo heartbeat. The heartbeat runs pre-login
+                    // and is vulnerable to credential exfiltration via MiTM if
+                    // TLS validation is bypassed. If the server needs the
+                    // address-book secret, it must be exchanged over an
+                    // authenticated channel (SRP or post-login API).
                     let ab_note = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_NOTE);
                     if !ab_note.is_empty() {
                         v[keys::OPTION_PRESET_ADDRESS_BOOK_NOTE] = json!(ab_note);
