@@ -7,8 +7,26 @@ use hbb_common::{
     ResultType,
 };
 use serde_derive::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 use totp_rs::{Algorithm, Secret, TOTP};
+
+/// Derive a per-installation encryption key from machine-specific data.
+/// Falls back to legacy key "00" if machine identifiers are unavailable.
+fn get_encryption_key() -> String {
+    let machine_id = hbb_common::get_uuid();
+    let install_id = Config::get_id();
+    if machine_id.is_empty() && install_id.is_empty() {
+        return "00".to_owned();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&machine_id);
+    hasher.update(install_id.as_bytes());
+    hasher.update(b"rustdesk-2fa-key");
+    hex::encode(hasher.finalize())
+}
+
+const LEGACY_ENCRYPTION_KEY: &str = "00";
 
 lazy_static::lazy_static! {
     static ref CURRENT_2FA: Mutex<Option<(TOTPInfo, TOTP)>> = Mutex::new(None);
@@ -17,18 +35,31 @@ lazy_static::lazy_static! {
 const ISSUER: &str = "RustDesk";
 const TAG_LOGIN: &str = "Connection";
 
+fn default_algorithm() -> String {
+    "SHA1".to_owned()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TOTPInfo {
     pub name: String,
     pub secret: Vec<u8>,
     pub digits: usize,
     pub created_at: i64,
+    /// TOTP hash algorithm. Defaults to "SHA1" for backward compatibility
+    /// with existing configs. New secrets use "SHA256".
+    #[serde(default = "default_algorithm")]
+    pub algorithm: String,
 }
 
 impl TOTPInfo {
     fn new_totp(&self) -> ResultType<TOTP> {
+        let algo = match self.algorithm.as_str() {
+            "SHA256" => Algorithm::SHA256,
+            "SHA512" => Algorithm::SHA512,
+            _ => Algorithm::SHA1, // Legacy compatibility
+        };
         let totp = TOTP::new(
-            Algorithm::SHA1,
+            algo,
             self.digits,
             1,
             30,
@@ -46,13 +77,15 @@ impl TOTPInfo {
             name,
             digits,
             created_at: get_time(),
+            algorithm: "SHA256".to_owned(),
             ..Default::default()
         };
         Ok(totp)
     }
 
     pub fn into_string(&self) -> ResultType<String> {
-        let secret = encrypt_vec_or_original(self.secret.as_slice(), "00", 1024);
+        let key = get_encryption_key();
+        let secret = encrypt_vec_or_original(self.secret.as_slice(), &key, 1024);
         let totp_info = TOTPInfo {
             secret,
             ..self.clone()
@@ -63,13 +96,27 @@ impl TOTPInfo {
 
     pub fn from_str(data: &str) -> ResultType<TOTP> {
         let mut totp_info = serde_json::from_str::<TOTPInfo>(data)?;
-        let (secret, success, _) = decrypt_vec_or_original(&totp_info.secret, "00");
+        let key = get_encryption_key();
+        let (secret, success, _) = decrypt_vec_or_original(&totp_info.secret, &key);
         if success {
             totp_info.secret = secret;
             return Ok(totp_info.new_totp()?);
-        } else {
-            bail!("decrypt_vec_or_original 2fa secret failed")
         }
+        // Migration: try legacy key for existing installations
+        let (secret, success, _) = decrypt_vec_or_original(&totp_info.secret, LEGACY_ENCRYPTION_KEY);
+        if success {
+            totp_info.secret = secret;
+            let totp = totp_info.new_totp()?;
+            // Re-encrypt with the new per-installation key (best-effort)
+            if let Ok(v) = totp_info.into_string() {
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                crate::ipc::set_option("2fa", &v);
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                Config::set_option("2fa".to_owned(), v);
+            }
+            return Ok(totp);
+        }
+        bail!("decrypt_vec_or_original 2fa secret failed")
     }
 }
 
@@ -121,7 +168,8 @@ pub struct TelegramBot {
 
 impl TelegramBot {
     fn into_string(&self) -> ResultType<String> {
-        let token = encrypt_vec_or_original(self.token_str.as_bytes(), "00", 1024);
+        let key = get_encryption_key();
+        let token = encrypt_vec_or_original(self.token_str.as_bytes(), &key, 1024);
         let bot = TelegramBot {
             token,
             ..self.clone()
@@ -145,9 +193,18 @@ impl TelegramBot {
             return Ok(None);
         }
         let mut bot = serde_json::from_str::<TelegramBot>(&data)?;
-        let (token, success, _) = decrypt_vec_or_original(&bot.token, "00");
+        let key = get_encryption_key();
+        let (token, success, _) = decrypt_vec_or_original(&bot.token, &key);
         if success {
             bot.token_str = String::from_utf8(token)?;
+            return Ok(Some(bot));
+        }
+        // Migration: try legacy key for existing installations
+        let (token, success, _) = decrypt_vec_or_original(&bot.token, LEGACY_ENCRYPTION_KEY);
+        if success {
+            bot.token_str = String::from_utf8(token)?;
+            // Re-encrypt with the new per-installation key (best-effort)
+            bot.save().ok();
             return Ok(Some(bot));
         }
         bail!("decrypt_vec_or_original telegram bot token failed")

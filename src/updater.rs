@@ -1,5 +1,6 @@
 use crate::{common::do_check_software_update, hbbs_http::create_http_client_with_url};
-use hbb_common::{bail, config, log, ResultType};
+use hbb_common::{bail, config, log, sodiumoxide::crypto::sign, ResultType};
+use sha2::{Digest, Sha256};
 use std::{
     io::Write,
     path::PathBuf,
@@ -10,6 +11,31 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+// Ed25519 public key for verifying update binary signatures.
+// TODO: Replace with the actual public key bytes from the release signing key.
+// Until a real key is configured, signature verification is skipped with a warning.
+const UPDATE_SIGN_PK: &[u8; 32] = &[0u8; 32];
+
+/// Verify the Ed25519 signature of a downloaded update binary.
+/// The signature file is expected to contain `sign::sign(sha256(file_data), secret_key)`.
+fn verify_update_signature(file_data: &[u8], sig_data: &[u8]) -> ResultType<()> {
+    let pk = sign::PublicKey(*UPDATE_SIGN_PK);
+    let verified_hash =
+        sign::verify(sig_data, &pk).map_err(|_| hbb_common::anyhow::anyhow!("Update signature verification failed"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(file_data);
+    let expected_hash = hasher.finalize().to_vec();
+    if verified_hash != expected_hash {
+        bail!("Update hash mismatch after signature verification");
+    }
+    Ok(())
+}
+
+/// Check if a real signing public key has been configured (not all zeros).
+fn is_update_signing_configured() -> bool {
+    UPDATE_SIGN_PK.iter().any(|&b| b != 0)
+}
 
 enum UpdateMsg {
     CheckUpdate,
@@ -184,6 +210,28 @@ fn check_update(manually: bool) -> ResultType<()> {
             let file_data = response.bytes()?;
             let mut file = std::fs::File::create(&file_path)?;
             file.write_all(&file_data)?;
+        }
+        // SECURITY: Verify the update binary signature before execution.
+        if is_update_signing_configured() {
+            let sig_url = format!("{}.sig", &download_url);
+            let sig_response = client.get(&sig_url).send()?;
+            if !sig_response.status().is_success() {
+                bail!(
+                    "Failed to download update signature file: {}",
+                    sig_response.status()
+                );
+            }
+            let sig_data = sig_response.bytes()?;
+            let file_data = std::fs::read(&file_path)?;
+            verify_update_signature(&file_data, &sig_data)?;
+            log::info!("Update signature verified successfully for {}", version);
+        } else {
+            log::warn!(
+                "Update signature verification is not configured. \
+                 Proceeding without signature check for version {}. \
+                 Configure UPDATE_SIGN_PK to enable verification.",
+                version
+            );
         }
         // We have checked if the `conns` is empty before, but we need to check again.
         // No need to care about the downloaded file here, because it's rare case that the `conns` are empty
