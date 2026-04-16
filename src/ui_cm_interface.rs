@@ -1655,7 +1655,7 @@ mod tests {
             match rx.recv().await.unwrap() {
                 Data::AllFilesResult { result, .. } => {
                     let bytes = result.unwrap();
-                    let fd = FileDirectory::parse_from_bytes(&bytes).unwrap();
+                    let fd = FileDirectory::parse_from_bytes(&bytes).expect("test: parse FileDirectory");
                     assert!(!fd.entries.is_empty());
                 }
                 _ => panic!("unexpected data"),
@@ -1679,7 +1679,7 @@ mod tests {
             match rx.recv().await.unwrap() {
                 Data::RawMessage(bytes) => {
                     let mut msg = Message::new();
-                    msg.merge_from_bytes(&bytes).unwrap();
+                    msg.merge_from_bytes(&bytes).expect("test: merge Message bytes");
                     assert!(msg
                         .file_response()
                         .dir()

@@ -52,12 +52,27 @@ pub(super) fn start_listening() -> ResultType<()> {
                                 if hostname == "localhost" {
                                     hostname = "unknown".to_owned();
                                 }
+                                // SECURITY: Only include sensitive details (username, MAC)
+                                // if explicitly enabled. By default, minimize information
+                                // disclosed to unauthenticated LAN peers.
+                                let include_details = config::option2bool(
+                                    "enable-lan-discovery-details",
+                                    &Config::get_option("enable-lan-discovery-details"),
+                                );
                                 let peer = PeerDiscovery {
                                     cmd: "pong".to_owned(),
-                                    mac: get_mac(&self_addr),
+                                    mac: if include_details {
+                                        get_mac(&self_addr)
+                                    } else {
+                                        String::new()
+                                    },
                                     id,
                                     hostname,
-                                    username: crate::platform::get_active_username(),
+                                    username: if include_details {
+                                        crate::platform::get_active_username()
+                                    } else {
+                                        String::new()
+                                    },
                                     platform: whoami::platform().to_string(),
                                     ..Default::default()
                                 };

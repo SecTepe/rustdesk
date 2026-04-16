@@ -1722,6 +1722,10 @@ impl Connection {
             self.update_options(&o).await;
         }
         if let Some((dir, show_hidden)) = self.file_transfer.clone() {
+            // SECURITY: File transfer sessions must not have keyboard or clipboard
+            // injection capability. Terminal and camera modes already disable these.
+            self.keyboard = false;
+            self.clipboard = false;
             let dir = if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
                 &dir
             } else {
@@ -2223,9 +2227,21 @@ impl Connection {
                     && device.name == lr.my_name
                     && device.platform == lr.my_platform
                 {
-                    log::info!("2FA bypassed by trusted devices");
+                    log::info!(
+                        "2FA bypassed by trusted device: id={}, name={}, ip={}",
+                        lr.my_id,
+                        lr.my_name,
+                        self.ip
+                    );
                     self.require_2fa = None;
                 }
+            } else {
+                // SECURITY: Log unknown HWID attempts for audit trail
+                log::warn!(
+                    "Trusted device lookup failed: unknown HWID from id={}, ip={}",
+                    lr.my_id,
+                    self.ip
+                );
             }
         }
         self.video_ack_required = lr.video_ack_required;
@@ -2516,10 +2532,13 @@ impl Connection {
             }
         } else if let Some(message::Union::TestDelay(t)) = msg.union {
             if t.from_client {
+                // Echo-back is harmless and needed for RTT measurement during login
                 let mut msg_out = Message::new();
                 msg_out.set_test_delay(t);
                 self.inner.send(msg_out.into());
-            } else {
+            } else if self.authorized {
+                // SECURITY: Only process QoS delay updates from authenticated connections.
+                // Unauthenticated clients could otherwise inject false network metrics.
                 if let Some(tm) = self.last_test_delay {
                     self.last_test_delay = None;
                     let new_delay = tm.elapsed().as_millis() as u32;
@@ -2533,28 +2552,37 @@ impl Connection {
         } else if let Some(message::Union::SwitchSidesResponse(_s)) = msg.union {
             #[cfg(feature = "flutter")]
             if let Some(lr) = _s.lr.clone().take() {
-                self.handle_login_request_without_validation(&lr).await;
+                // SECURITY: Validate UUID BEFORE any state mutation to prevent
+                // authentication bypass if UUID is leaked or intercepted.
                 SWITCH_SIDES_UUID
                     .lock()
                     .unwrap()
                     .retain(|_, v| v.0.elapsed() < Duration::from_secs(10));
                 let uuid_old = SWITCH_SIDES_UUID.lock().unwrap().remove(&lr.my_id);
-                if let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) {
-                    if let Some((_instant, uuid_old)) = uuid_old {
-                        if uuid == uuid_old {
-                            self.from_switch = true;
-                            if !self.send_logon_response_and_keep_alive().await {
-                                return false;
-                            }
-                            self.try_start_cm(
-                                lr.my_id.clone(),
-                                lr.my_name.clone(),
-                                self.authorized,
-                            );
-                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                            self.try_start_cm_ipc();
-                        }
+                let uuid_valid =
+                    if let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) {
+                        uuid_old.map_or(false, |(_, expected)| uuid == expected)
+                    } else {
+                        false
+                    };
+                if uuid_valid {
+                    self.handle_login_request_without_validation(&lr).await;
+                    self.from_switch = true;
+                    if !self.send_logon_response_and_keep_alive().await {
+                        return false;
                     }
+                    self.try_start_cm(
+                        lr.my_id.clone(),
+                        lr.my_name.clone(),
+                        self.authorized,
+                    );
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    self.try_start_cm_ipc();
+                } else {
+                    log::warn!(
+                        "SwitchSidesResponse with invalid/expired UUID from {}",
+                        self.ip
+                    );
                 }
             }
         } else if self.authorized {
